@@ -8,3 +8,6 @@ dist/
 build/
 *.pyc
 .DS_Store
+output.json
+.scrapy/
+protection.json
