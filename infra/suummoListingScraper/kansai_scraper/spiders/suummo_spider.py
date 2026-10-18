@@ -1,6 +1,8 @@
 import json    # read areas.json, our list of what to crawl
-import re      # regular expressions: used to pull the stable ID out of a URL
 import scrapy  # the crawling framework
+
+# All knowledge of SUUMO's detail-page markup lives in extract.py, not here.
+from kansai_scraper.extract import extract_listing
 
 
 class SuummoSpider(scrapy.Spider):
@@ -23,69 +25,51 @@ class SuummoSpider(scrapy.Spider):
         # Scrapy 2.13+ calls this to get the first requests. (The older
         # start_requests() was removed in 2.16, and a spider that only defines
         # it silently crawls nothing.)
-        # `async def` + `yield` makes this an "async generator": it hands
-        # requests to Scrapy one at a time instead of building a list.
         for area in self.areas:
             yield scrapy.Request(
                 area["search_url"],
-                # callback = "when this response comes back, run this method"
                 callback=self.parse_listing_page,
-                # meta = a small notebook that travels with the request, so the
-                # next stage knows which area it's in and which page number.
+                # meta = a small notebook that travels with the request.
                 meta={"area_code": area["code"], "page_num": 1},
             )
 
     def parse_listing_page(self, response):
         # Stage 2: runs once per search-results page.
-
-        # Look up this area's config (needed for its max_pages cap).
-        # next(... for ... if ...) means "first match in the list".
         area = next(a for a in self.areas if a["code"] == response.meta["area_code"])
         current_page = response.meta.get("page_num", 1)
 
-        # Forward only the keys we actually need. Copying all of response.meta
-        # drags along Scrapy's internal bookkeeping (e.g. download_latency),
-        # which triggered the MetaCopyDetectionMiddleware warning you saw.
+        # Forward only the keys we need (copying all of response.meta drags
+        # along Scrapy internals and triggers MetaCopyDetectionMiddleware).
         clean_meta = {"area_code": response.meta["area_code"]}
 
-        # Find every "詳細を見る" link on the page (the selector you confirmed in
-        # DevTools: the stable js- prefixed class). ::attr(href) extracts the URL
-        # text itself; getall() returns all matches as a list.
+        # One link per room row on the page (selector confirmed in DevTools).
         for link in response.css("a.js-cassette_link_href::attr(href)").getall():
-            # response.follow handles relative URLs like "/chintai/jnc_.../" by
-            # joining them to the current page's address. Each yield queues one
-            # request, whose response goes to parse_listing_detail.
             yield response.follow(link, callback=self.parse_listing_detail, meta=clean_meta)
 
-        # Pagination: only continue if we haven't reached the cap in areas.json.
-        # This is why max_pages limits search pages but not detail pages: it only
-        # gates the "next page" request, not the per-listing requests above.
-        if current_page < area.get("max_pages", 1):  # default 1 = fail safe
-            # Find the link whose text is 次へ ("Next"). Matching on text avoids
-            # accidentally grabbing the 前へ ("Previous") link in the same
-            # container. Note: straight quotes only; curly quotes break this.
+        # Pagination, capped by max_pages in areas.json. This caps SEARCH pages,
+        # not detail pages, which is why one capped crawl still makes ~100 requests.
+        if current_page < area.get("max_pages", 1):
+            # Match on the link TEXT (次へ = "Next") so we never grab 前へ ("Previous").
             next_page = response.css('p.pagination-parts a:contains("次へ")::attr(href)').get()
             if next_page:
                 yield response.follow(
                     next_page,
-                    callback=self.parse_listing_page,  # same method again: a loop
-                    # page_num + 1 is how the loop knows when to stop.
+                    callback=self.parse_listing_page,
                     meta={"area_code": response.meta["area_code"], "page_num": current_page + 1},
                 )
 
     def parse_listing_detail(self, response):
-        # Stage 3: runs once per listing page. Still a placeholder: it records
-        # identifiers only. Title, rent, address, 敷金/礼金 come next.
+        # Stage 3: runs once per listing detail page. The heavy lifting is in
+        # extract_listing(); this method only handles success/failure.
+        try:
+            listing = extract_listing(response.text, response.url)
+        except ValueError as err:
+            # A page we can't read must be VISIBLE, not silently dropped. The count
+            # shows up in the stats dump at the end of every crawl as
+            # 'extract/failed'. If that number is high, SUUMO changed its markup.
+            self.logger.warning("Skipping listing, extraction failed: %s", err)
+            self.crawler.stats.inc_value("extract/failed")
+            return
 
-        # Extract just "jnc_000109954940" from ".../chintai/jnc_000109954940/?bc=...".
-        # The ?bc=... part is a tracking parameter that can change between
-        # crawls, so the full URL would make one listing look like many.
-        listing_id_match = re.search(r"/chintai/(jnc_\d+)/", response.url)
-
-        # `yield` a dict = "here is one finished record". Scrapy writes it to
-        # output.json via the FEEDS setting.
-        yield {
-            "listing_id": listing_id_match.group(1) if listing_id_match else None,
-            "source_url": response.url,
-            "area_code": response.meta["area_code"],
-        }
+        listing["area_code"] = response.meta["area_code"]
+        yield listing  # Scrapy writes it to output.json via the FEEDS setting

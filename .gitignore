@@ -11,3 +11,4 @@ build/
 output.json
 .scrapy/
 protection.json
+tests/fixtures/detail_sample_*.html
