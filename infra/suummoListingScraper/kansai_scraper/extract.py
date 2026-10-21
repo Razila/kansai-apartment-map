@@ -75,6 +75,26 @@ def parse_stations(text):
     ]
 
 
+def classify_stove(equipment):
+    """What cooking equipment does the unit come with?
+        'IH'        induction cooktop installed (IHクッキングヒーター)
+        'stove'     a stove with N burners is listed (2口コンロ, ...)
+        'gas_ready' only gas-stove COMPATIBLE (ガスコンロ対応 / 設置可): there is a gas
+                    line, but you must bring your own stove
+        None        nothing stove-related listed
+    'N口コンロ' means the stove top has N burners, i.e. a stove IS installed
+    (confirmed against real pages)."""
+    if "IHクッキングヒーター" in equipment or "IHコンロ" in equipment:
+        return "IH"
+    if re.search(r"\d口コンロ|コンロ\d口", equipment):
+        return "stove"
+    if re.search(r"ガスコンロ(対応|設置可)|コンロ設置可", equipment):
+        return "gas_ready"
+    if "ガスコンロ" in equipment:
+        return "stove"
+    return None
+
+
 def _pick_thumbnail(sel):
     """Prefer the exterior photo (alt text contains 外観); fall back to the first
     photo. SUUMO lazy-loads images, so the real URL is in data-src, not src."""
@@ -189,13 +209,18 @@ def extract_listing(html, url=""):
         "parking_text": parking_text,
         # --- feature flags derived from the equipment string ---
         "has_ac": "エアコン" in equipment,
-        "has_oven": "オーブン" in equipment,          # rare in Japanese rentals; stove != oven
+        "stove_type": classify_stove(equipment),    # replaces the old has_oven flag
         "has_washer_hookup": "室内洗濯置" in equipment,
         "secured_entrance": "オートロック" in equipment,
         "bathroom_type": "バス・トイレ別" if "バストイレ別" in equipment else None,
-        # UNVERIFIED: neither sample page mentions pets at all. Rule is a guess
-        # until we capture a page where pets are allowed (see notes).
-        "pets_allowed": ("ペット" in equipment or "ペット" in conditions) and "ペット不可" not in equipment,
+        # ペット相談 = "pets: consult". Allowed subject to the landlord's approval, so
+        # the honest name is "negotiable", not "allowed". It is also SUUMO's own
+        # search filter. Confirmed on a real page: the term appears in BOTH the
+        # equipment list and the 条件 row, so we check both.
+        "pets_negotiable": "ペット相談" in equipment or "ペット相談" in conditions,
+        # 定期借家 = fixed-term lease (ends on a set date, may not be renewable);
+        # 普通借家 = ordinary renewable lease. None if the row is missing.
+        "fixed_term_lease": ("定期借家" in fields["契約期間"]) if fields.get("契約期間") else None,
         "equipment_text": equipment,                 # raw, so flags can be recomputed later
         "agency_name_ja": agency_name,
         "agency_logo_url": agency_logo,

@@ -12,3 +12,4 @@ output.json
 .scrapy/
 protection.json
 detail_sample_*.html
+*_sample*.html

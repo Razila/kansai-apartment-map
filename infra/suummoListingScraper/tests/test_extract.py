@@ -12,7 +12,7 @@ import pathlib
 
 import pytest
 
-from kansai_scraper.extract import extract_listing, parse_stations, parse_yen, split_address
+from kansai_scraper.extract import classify_stove, extract_listing, parse_stations, parse_yen, split_address
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
@@ -40,6 +40,9 @@ def test_listing_1_deposit_required_key_money_not():
     assert r["built_year"] == 2024
     assert r["nearest_station_walk_min"] == 2
     assert len(r["stations"]) == 3
+    assert r["stove_type"] == "IH"
+    assert r["fixed_term_lease"] is False        # 普通借家 2年
+    assert r["pets_negotiable"] is False
     assert r["agency_name_ja"].startswith("AFLO")
     assert r["thumbnail_url"].endswith("100527833746_go.jpg")
 
@@ -55,6 +58,7 @@ def test_listing_2_key_money_required_deposit_not():
     assert r["parking_available"] is False
     assert r["other_initial_costs"]["ほか初期費用"].startswith("合計2.75万円")
     assert r["has_ac"] and r["secured_entrance"] and r["has_washer_hookup"]
+    assert r["stove_type"] == "stove"            # 2口コンロ (+ ガスコンロ対応)
 
 
 # Guard against over-trimming: if the untrimmed pages are present, results must match.
@@ -100,3 +104,51 @@ def test_parse_stations():
         {"line": "地下鉄谷町線", "station": "天神橋筋六丁目駅", "walk_minutes": 2},
         {"line": "ＪＲ大阪環状線", "station": "天満駅", "walk_minutes": 10},
     ]
+
+
+# --- stove classification --------------------------------------------------------
+
+@pytest.mark.parametrize("equipment,expected", [
+    ("エアコン、2口コンロ、IHクッキングヒーター、駐輪場", "IH"),     # real sample 1
+    ("エアコン、ガスコンロ対応、2口コンロ、駐輪場", "stove"),        # real sample 2
+    ("エアコン、ガスコンロ対応、駐輪場", "gas_ready"),               # bring your own stove
+    ("エアコン、コンロ設置可", "gas_ready"),
+    ("エアコン、システムキッチン", None),
+])
+def test_classify_stove(equipment, expected):
+    assert classify_stove(equipment) == expected
+
+
+# --- pets and lease type ----------------------------------------------------------
+# No real page we have contains these terms in the positive case, so these tests
+# inject the term into a real fixture. They prove the RULE works; they do not prove
+# SUUMO puts the term in that spot. Replace with a real page once we capture one.
+
+def _inject(name, old, new):
+    html = load(name)
+    assert old in html, f"test setup: {old!r} not found in {name}"
+    return html.replace(old, new, 1)
+
+
+def test_pets_negotiable_detected_in_equipment_list():
+    html = _inject("listing_1_trimmed.html", "バストイレ別、", "バストイレ別、ペット相談、")
+    assert extract_listing(html, "https://suumo.jp/chintai/x/")["pets_negotiable"] is True
+
+
+def test_fixed_term_lease_detected():
+    html = _inject("listing_1_trimmed.html", "普通借家", "定期借家")
+    assert extract_listing(html, "https://suumo.jp/chintai/x/")["fixed_term_lease"] is True
+
+
+# --- real ペット相談 page (local only: the full page is git-ignored, so CI skips this) ---
+@pytest.mark.skipif(not (FIXTURES / "pets_sample.html").exists(), reason="full page not present")
+def test_real_pets_page():
+    r = extract_listing(load("pets_sample.html"), "https://suumo.jp/chintai/jnc_000107255542/?bc=1")
+    assert r["pets_negotiable"] is True
+    assert (r["rent_yen"], r["management_fee_yen"]) == (131000, 15000)
+    assert (r["requires_shikikin"], r["requires_reikin"]) == (False, False)
+    assert (r["floor"], r["total_floors"]) == (6, 11)
+    assert r["parking_available"] is True and r["parking_text"] == "敷地内41800円"
+    assert r["stove_type"] == "stove"        # 2口コンロ = installed 2-burner stove
+    assert r["fixed_term_lease"] is False
+    assert r["nearest_station_walk_min"] == 8 and len(r["stations"]) == 3
